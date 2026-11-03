@@ -1,0 +1,18 @@
+package: community.lazycat.app.plik
+name: Plik
+version: 0.0.0
+description: "Self-hosted file sharing: upload files and get a link, with expiry, one-shot downloads and password protection."
+min_os_version: "1.5.0"
+homepage: https://github.com/root-gg/plik
+author: Root GG
+license: MIT
+permissions:
+  required:
+    - net.internet
+locales:
+  zh:
+    name: Plik
+    description: "自托管文件分享：上传文件得到链接，支持有效期、一次性下载与密码保护。"
+  en:
+    name: Plik
+    description: "Self-hosted file sharing: upload files and get a link, with expiry, one-shot downloads and password protection."

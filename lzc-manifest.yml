@@ -1,0 +1,46 @@
+application:
+  subdomain: plik
+  multi_instance: false
+  # Shared file drops normally need to be reachable by whoever holds the link,
+  # and upstream ships with authentication disabled, so this stays behind the
+  # LazyCat entry instead of exposing public_path.
+  upstreams:
+    - location: /
+      backend: http://plik:8080/
+
+services:
+  plik:
+    # upstream: rootgg/plik:1.4.3
+    image: docker.1ms.run/rootgg/plik:1.4.3
+    environment:
+      # Keep the upstream defaults (file storage + sqlite) but point both at the
+      # persisted volume. These config values are given as JSON, which the image
+      # merges over its built-in plikd.cfg.
+      - PLIKD_DATA_BACKEND_CONFIG={"Directory":"/lzcapp/var/files"}
+      - PLIKD_METADATA_BACKEND_CONFIG={"Driver":"sqlite3","ConnectionString":"/lzcapp/var/db/plik.db"}
+      # Behind the entry, so let it derive the scheme from the proxy instead of
+      # forcing HTTPS/HSTS inside the container.
+      - PLIKD_ASSUME_HTTPS=false
+      - PLIKD_SOURCE_IP_HEADER=X-Forwarded-For
+      - TZ=Asia/Shanghai
+    binds:
+      # Uploaded files and the sqlite database.
+      - /lzcapp/var:/lzcapp/var
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 60s
+
+usage: |
+  Plik 是自托管的文件分享服务：上传文件后得到一个链接，可以设置有效期、
+  下载次数（一次性下载）、密码保护与自动清理，也支持"流式"直接转发不落盘。
+
+  - 它的定位是**方便地给别人传文件**，默认允许匿名上传（上游默认关闭了登录），
+    因此访问由懒猫入口负责鉴权，不会把上传界面直接暴露到公网。
+  - 数据保存在应用自己的持久化目录里（文件 + 内置 SQLite 数据库），
+    重启不会丢失；不需要你另外准备数据库或对象存储。
+  - 如需开启强制登录等多种认证方式，或改用 S3 等存储后端，需要自行扩展配置。
+  - 未做真机验证：上传文件、生成与访问分享链接、一次性下载、密码保护，
+    以及重启后数据留存均未在设备上实测。

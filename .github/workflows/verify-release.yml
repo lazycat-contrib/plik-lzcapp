@@ -1,0 +1,140 @@
+name: Verify MeshCentral Release on GitHub
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to verify
+        required: false
+        default: v1.3.1
+permissions:
+  contents: read
+concurrency:
+  group: meshcentral-release-verification
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then TAG="$(gh release view --json tagName --jq .tagName)"; fi
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Download exact Release asset on runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ASSET_NAME="community.lazycat.app.meshcentral-${RELEASE_TAG}.lpk"
+          echo "ASSET_NAME=$ASSET_NAME" >> "$GITHUB_ENV"
+          gh release view "$RELEASE_TAG" --json tagName,assets > release-metadata.json
+          gh release download "$RELEASE_TAG" --pattern "$ASSET_NAME" --dir verify-pkg
+
+      - name: Verify package contents
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, re, tarfile, yaml
+
+          tag = os.environ['RELEASE_TAG']
+          name = os.environ['ASSET_NAME']
+          pkg = __import__('pathlib').Path('verify-pkg') / name
+          assert pkg.is_file(), pkg
+
+          h = hashlib.sha256()
+          with pkg.open('rb') as fh:
+              for chunk in iter(lambda: fh.read(1 << 20), b''):
+                  h.update(chunk)
+
+          with tarfile.open(pkg, 'r:') as package:
+              members = package.getnames()
+              for required in ('manifest.yml', 'package.yml', 'content.tar', 'icon.png'):
+                  assert required in members, (required, members)
+
+              info = yaml.safe_load(package.extractfile('package.yml').read())
+              assert info['package'] == 'community.lazycat.app.meshcentral', info['package']
+              assert info['name'] == 'MeshCentral', info['name']
+              assert info['version'] == tag.lstrip('v'), (info['version'], tag)
+              assert info['license'] == 'Apache-2.0', info['license']
+              assert info['min_os_version'] == '1.5.0', info['min_os_version']
+
+              raw = package.extractfile('manifest.yml').read().decode()
+              m = yaml.safe_load(raw)
+              app = m['application']
+              assert app['subdomain'] == 'meshcentral', app['subdomain']
+              # own accounts plus an admin console: no platform gate in front
+              assert app.get('public_path') == ['/'], app.get('public_path')
+              ups = app['upstreams']
+              # the service listens on 443 and speaks plain http behind the ingress
+              assert any(u['location'] == '/' and 'meshcentral:443' in (u.get('backend') or '')
+                         for u in ups), ups
+
+              svcs = m['services']
+              assert set(svcs) == {'meshcentral'}, set(svcs)
+              svc = svcs['meshcentral']
+              img = svc['image']
+              # the maintained image lives on ghcr; a bare name would have been
+              # silently resolved against Docker Hub instead
+              assert 'ylianst/meshcentral' in img, img
+              assert 'ghcr' in img, ('image must come from ghcr, not Docker Hub', img)
+              assert img.endswith(':' + tag.lstrip('v')), img
+
+              env = ' '.join(str(x) for x in svc['environment'])
+              # registration is the only way to get the first account
+              assert 'ALLOW_NEW_ACCOUNTS=true' in env, env
+              assert 'HOSTNAME=' in env and '.S.AppDomain' in env, env
+              # TLS terminates at the ingress
+              assert 'TLS_OFFLOAD=' in env, env
+              # guards against inheriting the placeholder session key in the
+              # image's config template
+              assert 'REGEN_SESSIONKEY=true' in env, env
+              assert 'MyReallySecretPassword1' not in raw, \
+                  'placeholder session key must not appear in the package'
+
+              binds = svc['binds']
+              # config, certificates and the account database
+              assert any(b.endswith(':/opt/meshcentral/meshcentral-data') for b in binds), binds
+              for b in binds:
+                  assert b.startswith('/lzcapp/var/'), b
+
+              params = yaml.safe_load(package.extractfile('deploy_params.yml').read())
+              assert params['params'] == [], params
+              refs = set(re.findall(r'\.U\.([A-Za-z0-9_]+)', raw))
+              assert refs == set(), ('unexpected deploy param refs', refs)
+
+              assert 'healthcheck' not in svc, svc
+              assert 'lzc-file-chooser' not in raw
+              assert 'docker.sock' not in raw
+              assert 'privileged' not in raw
+              assert 'usage' in m and str(m['usage']).strip(), 'usage section missing'
+              usage_text = str(m['usage'])
+              assert ('真机验证' in usage_text or '实机验证' in usage_text), 'usage must state no device test'
+              # the reach of this app is limited and that must be disclosed
+              assert '管不了' in usage_text or '边界' in usage_text or '自己另外安装' in usage_text, \
+                  'usage should disclose what this deployment cannot manage'
+
+              with tarfile.open(fileobj=package.extractfile('content.tar')) as content:
+                  cmembers = content.getnames()
+                  lic = [n for n in cmembers if 'licenses/' in n]
+                  assert lic, cmembers
+                  main_lic = [n for n in lic if n.endswith('/LICENSE')]
+                  target = main_lic[0] if main_lic else lic[0]
+                  license_text = content.extractfile(target).read().decode()
+                  flat = ' '.join(license_text.split())
+                  assert 'Apache License' in flat and 'Version 2.0' in flat, flat[:150]
+
+          result = {
+              'verified': True,
+              'tag': tag,
+              'sha256': h.hexdigest(),
+              'size': pkg.stat().st_size,
+              'runtime_tested': False,
+              'note': 'single container on 443 behind the ingress; registration enabled for the first account; session key regenerated',
+          }
+          print(json.dumps(result))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('```json\n' + json.dumps(result, indent=2) + '\n```\n')
+          PY
