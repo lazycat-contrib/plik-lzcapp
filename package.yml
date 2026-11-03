@@ -1,6 +1,6 @@
 package: community.lazycat.app.plik
 name: Plik
-version: 1.4.3
+version: 0.0.0
 description: "Self-hosted file sharing: upload files and get a link, with expiry, one-shot downloads and password protection."
 min_os_version: "1.5.0"
 homepage: https://github.com/root-gg/plik
